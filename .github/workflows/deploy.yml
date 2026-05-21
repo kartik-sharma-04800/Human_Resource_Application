@@ -1,9 +1,16 @@
-name: Build, Push and Deploy to EC2
+name: Build, Push and Deploy Backend to EC2
+
 on:
   push:
     branches:
       - main
       - master
+    paths:
+      - 'src/**'
+      - 'pom.xml'
+      - 'Dockerfile'
+      - 'docker-compose.prod.yml'
+      - '.github/workflows/deploy-backend.yml'
   workflow_dispatch:
 
 jobs:
@@ -30,27 +37,27 @@ jobs:
           file: ./Dockerfile
           push: true
           tags: |
-            ${{ secrets.DOCKER_USERNAME }}/hr-frontend:latest
-            ${{ secrets.DOCKER_USERNAME }}/hr-frontend:${{ github.sha }}
-          cache-from: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/hr-frontend:buildcache
-          cache-to: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/hr-frontend:buildcache,mode=max
+            ${{ secrets.DOCKER_USERNAME }}/hr-application:latest
+            ${{ secrets.DOCKER_USERNAME }}/hr-application:${{ github.sha }}
+          cache-from: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/hr-application:buildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/hr-application:buildcache,mode=max
 
       - name: Deploy to EC2
         uses: appleboy/ssh-action@v1.2.2
         with:
-          host: ${{ secrets.EC2_HOST }}
+          host: ${{ secrets.EC2_BACKEND_HOST }}
           username: ${{ secrets.EC2_USERNAME }}
           key: ${{ secrets.EC2_SSH_KEY }}
           port: ${{ secrets.EC2_SSH_PORT || 22 }}
           script: |
             # Navigate to application directory
-            cd /home/${{ secrets.EC2_USERNAME }}/hr_fr || mkdir -p /home/${{ secrets.EC2_USERNAME }}/hr_fr && cd /home/${{ secrets.EC2_USERNAME }}/hr_fr
+            cd /home/${{ secrets.EC2_USERNAME }}/hr_deploy
 
             # Download docker-compose.prod.yml from repository
             sudo curl -o docker-compose.prod.yml https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/docker-compose.prod.yml
 
             # Pull latest image
-            sudo docker pull ${{ secrets.DOCKER_USERNAME }}/hr-frontend:latest
+            sudo docker pull ${{ secrets.DOCKER_USERNAME }}/hr-application:latest
 
             # Stop and remove old containers
             sudo docker compose -f docker-compose.prod.yml down
@@ -73,6 +80,32 @@ jobs:
           port: ${{ secrets.EC2_SSH_PORT || 22 }}
           script: |
             # Wait for container to be healthy
-            sleep 10
-            sudo docker ps | grep hr_frontend_prod
-            echo "Deployment completed successfully!"
+            echo "Waiting for application to start..."
+            sleep 30
+            
+            # Check if container is running
+            if sudo docker ps | grep hr_application_prod; then
+              echo "✅ Container is running"
+            else
+              echo "❌ Container is not running"
+              sudo docker ps -a | grep hr_application_prod
+              exit 1
+            fi
+            
+            # Check health endpoint
+            echo "Checking health endpoint..."
+            for i in {1..10}; do
+              if curl -f http://localhost:8080/actuator/health; then
+                echo "✅ Health check passed"
+                break
+              else
+                echo "⏳ Waiting for health check... (attempt $i/10)"
+                sleep 10
+              fi
+            done
+            
+            # Show logs
+            echo "Recent logs:"
+            sudo docker logs --tail 50 hr_application_prod
+            
+            echo "🎉 Deployment completed successfully!"
