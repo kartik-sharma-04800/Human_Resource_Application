@@ -1,0 +1,78 @@
+name: Build, Push and Deploy to EC2
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3.10.0
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3.4.0
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6.15.0
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/hr-frontend:latest
+            ${{ secrets.DOCKER_USERNAME }}/hr-frontend:${{ github.sha }}
+          cache-from: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/hr-frontend:buildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/hr-frontend:buildcache,mode=max
+
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1.2.2
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: ${{ secrets.EC2_SSH_PORT || 22 }}
+          script: |
+            # Navigate to application directory
+            cd /home/${{ secrets.EC2_USERNAME }}/hr_fr || mkdir -p /home/${{ secrets.EC2_USERNAME }}/hr_fr && cd /home/${{ secrets.EC2_USERNAME }}/hr_fr
+
+            # Download docker-compose.prod.yml from repository
+            sudo curl -o docker-compose.prod.yml https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/docker-compose.prod.yml
+
+            # Pull latest image
+            sudo docker pull ${{ secrets.DOCKER_USERNAME }}/hr-frontend:latest
+
+            # Stop and remove old containers
+            sudo docker compose -f docker-compose.prod.yml down
+
+            # Start new containers
+            sudo docker compose -f docker-compose.prod.yml up -d
+
+            # Clean up old images
+            sudo docker image prune -af
+
+            # Show running containers
+            sudo docker ps
+
+      - name: Verify deployment
+        uses: appleboy/ssh-action@v1.2.2
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: ${{ secrets.EC2_SSH_PORT || 22 }}
+          script: |
+            # Wait for container to be healthy
+            sleep 10
+            sudo docker ps | grep hr_frontend_prod
+            echo "Deployment completed successfully!"
